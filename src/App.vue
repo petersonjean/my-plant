@@ -9,6 +9,7 @@
         <select v-model="preset" class="w-full border rounded px-2 py-1 text-sm">
           <option value="monopodial">Monopodial (lateral)</option>
           <option value="sympodial">Sympodial (Aono–Kunii inspired)</option>
+          <option value="leaf">Leaf (parametric veins)</option>
         </select>
       </div>
 
@@ -29,7 +30,45 @@
       </div>
 
       <div v-if="tab==='controls'" class="p-3 text-xs text-slate-700 leading-relaxed">
-        <p>Pick a preset, tweak <b>Steps</b> and <b>Seed</b>. The grammar below updates automatically. Edit the DSL to customize rules; the right side renders the result.</p>
+        <template v-if="tab==='controls'">
+          <div class="mb-2 text-sm font-medium">Leaf parameters (apply to all presets)</div>
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="block text-[11px] uppercase tracking-wide text-slate-500">LA (main init)</label>
+              <input type="range" min="0.5" max="10" step="0.5" v-model.number="LA" />
+              <input type="number" class="w-full border rounded px-2 py-1" v-model.number="LA" />
+            </div>
+            <div>
+              <label class="block text-[11px] uppercase tracking-wide text-slate-500">RA (main rate)</label>
+              <input type="range" min="0.6" max="1.6" step="0.02" v-model.number="RA" />
+              <input type="number" class="w-full border rounded px-2 py-1" step="0.01" v-model.number="RA" />
+            </div>
+            <div>
+              <label class="block text-[11px] uppercase tracking-wide text-slate-500">LB (lat init)</label>
+              <input type="range" min="0.2" max="5" step="0.2" v-model.number="LB" />
+              <input type="number" class="w-full border rounded px-2 py-1" v-model.number="LB" />
+            </div>
+            <div>
+              <label class="block text-[11px] uppercase tracking-wide text-slate-500">RB (lat rate)</label>
+              <input type="range" min="0.6" max="1.6" step="0.02" v-model.number="RB" />
+              <input type="number" class="w-full border rounded px-2 py-1" step="0.01" v-model.number="RB" />
+            </div>
+            <div>
+              <label class="block text-[11px] uppercase tracking-wide text-slate-500">PD (potential dec)</label>
+              <input type="range" min="0.2" max="2" step="0.1" v-model.number="PD" />
+              <input type="number" class="w-full border rounded px-2 py-1" step="0.1" v-model.number="PD" />
+            </div>
+            <div>
+              <label class="block text-[11px] uppercase tracking-wide text-slate-500">Δ (delta, deg)</label>
+              <input type="range" min="15" max="85" step="1" v-model.number="DELTA" />
+              <input type="number" class="w-full border rounded px-2 py-1" v-model.number="DELTA" />
+            </div>
+          </div>
+          <p class="mt-2">This preset follows the parametric leaf model (Fig. 5.6 style): <code>A(t)→G(LA,RA)[−(Δ)B(t).][A(t+1)][+(Δ)B(t).]</code>, <code>B(t)[t&gt;0]→G(LB,RB)B(t−PD).</code></p>
+        </template>
+        <template v-else>
+          <p>Pick a preset, tweak <b>Steps</b> and <b>Seed</b>. The grammar below updates automatically. Edit the DSL to customize rules; the right side renders the result.</p>
+        </template>
       </div>
       <div v-else class="p-3">
         <textarea v-model="dsl" class="code" spellcheck="false"></textarea>
@@ -214,7 +253,7 @@ function buildPlant (word, opts = {}) {
   const H0 = new THREE.Vector3(0, 1, 0)
   const L0 = new THREE.Vector3(-1, 0, 0)
   const U0 = new THREE.Vector3(0, 0, 1)
-  const state = { pos: new THREE.Vector3(0, 0, 0), H: H0.clone(), L: L0.clone(), U: U0.clone(), w: initialWidth }
+  const state = { pos: new THREE.Vector3(0, 0, 0), H: H0.clone(), L: L0.clone(), U: U0.clone(), w: initialWidth, g: step }
   const stack = []
 
   const toRad = d => d * Math.PI / 180
@@ -268,29 +307,51 @@ function buildPlant (word, opts = {}) {
       m.multiply(new THREE.Matrix4().makeScale(size, size, size))
       leafTransforms.push(m)
     }
+    else if (t === 'G') {
+      // Update current growth step length (used by '.')
+      state.g = p[0] ?? state.g
+    }
+    else if (t === '.') {
+      const len = state.g ?? step
+      const p0 = state.pos.clone()
+      const p1 = state.pos.clone().addScaledVector(state.H, len)
+      const g = makeCylinder(p0, p1, Math.max(0.01, (opts.veinWidth ?? state.w * 0.4)))
+      if (g) branchGeoms.push(g)
+      state.pos.copy(p1)
+    }
   }
 
   const branchGeometry = branchGeoms.length ? mergeGeometries(branchGeoms, false) : new THREE.BufferGeometry()
   const branchMaterial = new THREE.MeshStandardMaterial({ metalness: 0, roughness: 0.9, color: new THREE.Color(0x7a5c3f) })
   const branchMesh = new THREE.Mesh(branchGeometry, branchMaterial)
 
-  const leafGeom = opts.leaf?.geometry ?? new THREE.PlaneGeometry(1, 0.5, 1, 1)
-  const leafMat = opts.leaf?.material ?? new THREE.MeshStandardMaterial({ color: new THREE.Color(0x2e8b57), side: THREE.DoubleSide })
   const leafCount = leafTransforms.length
-  const leavesMesh = new THREE.InstancedMesh(leafGeom, leafMat, Math.max(leafCount, 1))
-  leavesMesh.count = leafCount
-  for (let i = 0; i < leafCount; i++) leavesMesh.setMatrixAt(i, leafTransforms[i])
-  leavesMesh.instanceMatrix.needsUpdate = true
-
-  const group = new THREE.Group()
-  group.add(branchMesh)
-  group.add(leavesMesh)
-  return group
+const group = new THREE.Group()
+group.add(branchMesh)
+if (leafCount > 0) {
+  // Lamina instancing
+  const laminaGeom = opts.leaf?.geometryLamina ?? new THREE.PlaneGeometry(1,0.5,1,1)
+  const laminaMat = new THREE.MeshStandardMaterial({ color: new THREE.Color(0x7fbf7f), side: THREE.DoubleSide, roughness: 0.8, metalness: 0 })
+  const laminaInst = new THREE.InstancedMesh(laminaGeom, laminaMat, leafCount)
+  for (let i=0;i<leafCount;i++) laminaInst.setMatrixAt(i, leafTransforms[i])
+  laminaInst.instanceMatrix.needsUpdate = true
+  group.add(laminaInst)
+  // Veins instancing (optional)
+  if (opts.leaf?.geometryVeins) {
+    const veinMat = new THREE.MeshStandardMaterial({ color: new THREE.Color(0x3b3b3b), roughness: 0.9, metalness: 0 })
+    const veinInst = new THREE.InstancedMesh(opts.leaf.geometryVeins, veinMat, leafCount)
+    for (let i=0;i<leafCount;i++) veinInst.setMatrixAt(i, leafTransforms[i])
+    veinInst.instanceMatrix.needsUpdate = true
+    group.add(veinInst)
+  }
+}
+return group
 }
 
 // ---------------------------- Vue state & Three scene ----------------------------
 const mount = ref(null)
 const seed = ref(3)
+const VEIN = ref(12)
 const steps = ref(12)
 const schedule = ref([
   { name: 'veg', steps: 8 },
@@ -303,6 +364,9 @@ const scheduleLabel = computed(() => schedule.value.map(s => `${s.name}×${s.ste
 const tab = ref('dsl')
 const preset = ref('monopodial')
 const tabBtn = (n) => `px-2 py-1 rounded text-sm ${tab.value===n? 'bg-slate-900 text-white':'bg-slate-100 text-slate-700'}`
+
+// Leaf parameters (reactive)
+const LA = ref(5), RA = ref(1), LB = ref(1), RB = ref(1), PD = ref(1), DELTA = ref(60)
 
 // ---- DSL presets (modular) ----
 function dslMonopodial () { return `
@@ -335,11 +399,104 @@ A(l,w) -> !(w) F(l*0.6) [&(25) L(0.6)] [^(25) L(0.6)]
 B(l,w) -> !(w) F(l*0.6) [&(20) L(0.5)] [^(20) L(0.5)]
 ` }
 
-const dsl = ref('')
-function resetPreset(){ dsl.value = (preset.value === 'monopodial' ? dslMonopodial() : dslSympodial()) }
-watch(preset, resetPreset, { immediate: true }); schedule.value.map(s => `${s.name}×${s.steps}`).join(' → ');
+function dslLeafParametric () {
+  return `
+TABLE veg:
+# Parametric leaf per ABOP Fig. 5.6-style
+A(t) -> G(LA,RA) [-(DELTA) B(t) .] [A(t+1)] [+(DELTA) B(t) .]
+B(t) [t>0] -> G(LB,RB) B(t-PD) .
+G(s,r) -> G(s*r,r)
+`}
 
-let renderer, scene, camera, controls;
+// Programmatic table for leaf so we can use a proper condition t>0
+function makeLeafTables() {
+  const veg = new Map();
+  veg.set('A', [{ succ: ([t]) => [
+    new Sym('G',[LA.value, RA.value]),
+    new Sym('['), new Sym('-', [DELTA.value]), new Sym('B',[t]), new Sym('.'), new Sym(']'),
+    new Sym('['), new Sym('A',[t+1]), new Sym(']'),
+    new Sym('['), new Sym('+', [DELTA.value]), new Sym('B',[t]), new Sym('.'), new Sym(']')
+  ] }]);
+  veg.set('B', [{ cond: ([t]) => t>0, succ: ([t]) => [ new Sym('G',[LB.value, RB.value]), new Sym('B',[t-PD.value]), new Sym('.') ] }]);
+  veg.set('G', [{ succ: ([s,r]) => [ new Sym('G',[s*r, r]) ] }]);
+  return [ { name:'veg', productions: veg } ];
+}
+
+// Build a parametric-leaf vein geometry once, then instance it via L() placements
+function buildParamLeafGeometry(nSteps = 20, veinWidth = VEIN.value) {
+  // Analytic construction of midrib & margins (fast and robust)
+  const leftPts = []; const rightPts = []; const midPts = [new THREE.Vector3(0,0,0)];
+  let P = new THREE.Vector3(0,0,0); // current point on midrib
+  const H = new THREE.Vector3(0,1,0); // heading up
+  const U = new THREE.Vector3(0,0,1);
+  let sMain = LA.value; // main segment length
+  let t = 0;            // growth potential for laterals
+  const rotQ = (deg)=>new THREE.Quaternion().setFromAxisAngle(U, THREE.MathUtils.degToRad(deg));
+
+  for (let i=0;i<nSteps;i++) {
+    // lateral total length after k steps where k = floor(t/PD)
+    const k = Math.max(0, Math.floor(t / PD.value));
+    const rb = RB.value;
+    const latLen = (rb === 1) ? LB.value * k : LB.value * (1 - Math.pow(rb, k)) / (1 - rb);
+
+    // left & right margin points from current midrib point
+    const leftDir = H.clone().applyQuaternion(rotQ(-DELTA.value));
+    const rightDir = H.clone().applyQuaternion(rotQ(+DELTA.value));
+    leftPts.push(P.clone().addScaledVector(leftDir, latLen));
+    rightPts.push(P.clone().addScaledVector(rightDir, latLen));
+
+    // advance midrib
+    const Pnext = P.clone().addScaledVector(H, sMain);
+    midPts.push(Pnext);
+    P = Pnext; sMain *= RA.value; t += 1;
+  }
+
+  // Vein meshes: midrib + laterals as cylinders
+  const geoms = [];
+  const cyl = (a,b,d)=>{
+    const dir = new THREE.Vector3().subVectors(b,a); const len = dir.length(); if (len<=1e-6) return null;
+    const mid = a.clone().add(b).multiplyScalar(0.5);
+    const g = new THREE.CylinderGeometry(d*0.5, d*0.5, len, 6);
+    const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0,1,0), dir.clone().normalize());
+    g.applyQuaternion(q); g.translate(mid.x, mid.y, mid.z); return g;
+  };
+  // midrib segments
+  for (let i=0;i<midPts.length-1;i++) { const g=cyl(midPts[i], midPts[i+1], veinWidth); if(g) geoms.push(g); }
+  // laterals
+  for (let i=0;i<nSteps;i++) {
+    const gL=cyl(midPts[i], leftPts[i], veinWidth); if(gL) geoms.push(gL);
+    const gR=cyl(midPts[i], rightPts[i], veinWidth); if(gR) geoms.push(gR);
+  }
+  const veinsGeom = geoms.length ? mergeGeometries(geoms,false) : new THREE.BufferGeometry();
+
+  // Lamina polygon (left margin up, then right margin down)
+  const outline = [...leftPts, ...rightPts.slice().reverse()];
+  const shape = new THREE.Shape(outline.map(v=> new THREE.Vector2(v.x, v.y)));
+  const laminaGeom = new THREE.ShapeGeometry(shape);
+
+  return { veins: veinsGeom, lamina: laminaGeom };
+}
+
+const dsl = ref('')
+function resetPreset(){
+  if (preset.value === 'monopodial') {
+    dsl.value = dslMonopodial();
+    schedule.value = [ { name: 'veg', steps: 8 }, { name: 'flower', steps: 4 } ];
+    steps.value = 12;
+  } else if (preset.value === 'sympodial') {
+    dsl.value = dslSympodial();
+    schedule.value = [ { name: 'veg', steps: 10 } ];
+    steps.value = 14;
+  } else {
+    // leaf preset
+    dsl.value = dslLeafParametric();
+    schedule.value = [ { name: 'veg', steps: 20 } ];
+    steps.value = 20;
+  }
+}
+watch(preset, resetPreset, { immediate: true })
+
+let renderer, scene, camera, controls
 let plantGroup = null
 
 function rebuildScene (word) {
@@ -356,9 +513,23 @@ function rebuildScene (word) {
     })
     plantGroup = null
   }
+  // Optional param-leaf geometry (used by all presets except standalone leaf mode)
+  const blade = buildParamLeafGeometry(Math.max(12, steps.value), VEIN.value)
   // Build & add new plant
-  plantGroup = buildPlant(word, { angle: 25, step: 0.6, width: 0.12, radialSegments: 8, leaf: { size: 0.35 } })
-  scene.add(plantGroup)
+let opts;
+if (preset.value === 'leaf') {
+  // Standalone leaf: render one lamina + veins at origin
+  const laminaMat = new THREE.MeshStandardMaterial({ color: new THREE.Color(0x7fbf7f), side: THREE.DoubleSide, roughness: 0.8, metalness: 0 });
+  const veinMat = new THREE.MeshStandardMaterial({ color: new THREE.Color(0x3b3b3b), roughness: 0.9, metalness: 0 });
+  const lamina = new THREE.Mesh(blade.lamina, laminaMat);
+  const veins = new THREE.Mesh(blade.veins, veinMat);
+  plantGroup = new THREE.Group(); plantGroup.add(lamina); plantGroup.add(veins);
+} else {
+  opts = { angle: 25, step: 0.6, width: 0.12, radialSegments: 8,
+    leaf: { size: 0.35, geometryLamina: blade.lamina, geometryVeins: blade.veins } };
+  plantGroup = buildPlant(word, opts);
+}
+scene.add(plantGroup)
   // Fit camera to bbox
   const bbox = new THREE.Box3().setFromObject(plantGroup)
   const size = bbox.getSize(new THREE.Vector3())
@@ -371,17 +542,22 @@ function rebuildScene (word) {
 
 function deriveWord () {
   const rand = makeRng(seed.value)
-  let tables
-  try {
-    tables = parseDSL(dsl.value)
-  } catch (e) {
-    console.error('DSL parse error:', e)
-    // Fallback to a minimal table if parse fails
-    tables = [{ name: 'veg', productions: new Map([['A', [{ succ: ([l,w]) => [new Sym('!', [w]), new Sym('F', [l]), new Sym('A', [l*0.9, w*0.95])]}]]]) }]
+  // Choose tables based on preset; leaf uses programmatic tables for speed and conditions
+  let tables, localSchedule, axiom
+  if (preset.value === 'leaf') {
+    tables = makeLeafTables()
+    localSchedule = [ { name: 'veg', steps: steps.value } ]
+    axiom = [ new Sym('[', []), new Sym('A', [0]), new Sym(']', []) ]
+  } else {
+    try { tables = parseDSL(dsl.value) }
+    catch (e) {
+      console.error('DSL parse error:', e)
+      tables = [{ name: 'veg', productions: new Map([['A', [{ succ: ([l,w]) => [new Sym('!', [w]), new Sym('F', [l]), new Sym('A', [l*0.9, w*0.95])]}]]]) }]
+    }
+    localSchedule = schedule.value
+    axiom = [ new Sym('[', []), new Sym('A', [1.2, 0.13]), new Sym(']', []) ]
   }
-  const axiom = [ new Sym('[', []), new Sym('A', [1.2, 0.13]), new Sym(']', []) ]
-  const w = deriveWithTables(axiom, tables, schedule.value, steps.value, rand)
-  return w
+  return deriveWithTables(axiom, tables, localSchedule, steps.value, rand)
 }
 
 onMounted(() => {
@@ -427,7 +603,7 @@ onMounted(() => {
   }
   window.addEventListener('resize', handleResize)
 
-  const stopW = watch([seed, steps, schedule, dsl], () => rebuildScene(deriveWord()))
+  const stopW = watch([seed, steps, schedule, dsl, LA, RA, LB, RB, PD, DELTA, VEIN, preset], () => rebuildScene(deriveWord()))
 
   onBeforeUnmount(() => {
     stopW()
@@ -440,7 +616,7 @@ onMounted(() => {
 </script>
 
 <style>
-html, body, #app { width: 100%; height: 100%; margin: 0; }
+html, body, #app { height: 100%; margin: 0; }
 .viewer { flex: 1 1 auto; min-height: 420px; height: calc(100vh - 0px); }
 .btn { background:#0f172a; color:white; padding:0.25rem 0.6rem; border-radius:0.6rem; font-size:0.875rem }
 .btn-alt { background:#e2e8f0; color:#0f172a; padding:0.25rem 0.6rem; border-radius:0.6rem; font-size:0.875rem }
