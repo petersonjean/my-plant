@@ -2,12 +2,12 @@
   <div class="w-full h-full flex flex-col">
     <div class="p-3 flex items-center gap-3 border-b" style="background:rgba(255,255,255,.7);backdrop-filter:saturate(1.2) blur(6px)">
       <div class="text-sm font-medium">Steps</div>
-      <input type="range" min="3" max="18" v-model.number="steps" />
-      <div class="text-sm tabular-nums w-6 text-right">{{ steps }}</div>
+      <input type="range" min="3" max="24" v-model.number="steps" />
+      <div class="text-sm tabular-nums w-8 text-right">{{ steps }}</div>
       <button class="px-3 py-1 rounded-xl text-white text-sm" style="background:#0f172a" @click="seed++">Reseed</button>
-      <div class="text-xs text-slate-600">Tables: {{ scheduleLabel }}</div>
+      <div class="text-xs text-slate-600 truncate">Tables: {{ scheduleLabel }}</div>
     </div>
-    <div ref="mount" class="flex-1"></div>
+    <div ref="mount" class="viewer"></div>
   </div>
 </template>
 
@@ -34,13 +34,7 @@ function makeRng (seed = 1) {
   }
 }
 
-/**
- * One parallel derivation step (pure) with:
- *  - parametric symbols
- *  - optional conditions (cond(params, leftSym, rightSym))
- *  - stochastic choice with .prob weights
- * productions: Map<string, Array<{ cond?:Function, prob?:number, succ:(params, rand, i, word)=>Sym[] }>>
- */
+/** One parallel derivation step (pure) */
 function deriveOnce (word, productions, rand) {
   const out = []
   for (let i = 0; i < word.length; i++) {
@@ -79,13 +73,103 @@ function deriveWithTables (axiom, tables, schedule, steps, rand) {
   return word
 }
 
-// ---------------------------- 3D Turtle Interpreter ----------------------------
+// ---------------------------- Tiny DSL parser for productions ----------------------------
 /**
- * buildPlant(word, opts)
- *  - Implements + − & ^ \\ / | [ ] !
- *  - ! sets diameter when parameter present, otherwise tapers (×0.7071)
- *  - Leaf instancing for L(size)
+ * Grammar (tiny, whitespace-insensitive):
+ *   TABLE <name>:
+ *   <Head> [ : <prob> ] -> <RHS>
+ *   <Head> := SYM | SYM ( id[, id]* )
+ *   <RHS>  := token{space} ...
+ *   token  := SYM | SYM(expr[,expr]*) | [ | ] | | | +[(expr)] | -[(expr)] | &[(expr)] | ^[(expr)] | \\[(expr)] | /[(expr)] | ![(expr)]
+ * - Functions available in expr: Math.* and rand()
+ * - Variables in expr are exactly the Head parameter names.
  */
+function parseDSL (text) {
+  const lines = text.split(/\n+/)
+  /** @type {{name:string, productions: Map<string, any[]>}[]} */
+  const tables = []
+  let current = null
+
+  function ensureTable (name) {
+    current = { name, productions: new Map() }
+    tables.push(current)
+  }
+
+  for (let raw of lines) {
+    let line = raw.trim()
+    if (!line || line.startsWith('#') || line.startsWith('//')) continue
+    const mTable = line.match(/^TABLE\s+([A-Za-z0-9_\-]+)\s*:\s*$/i)
+    if (mTable) { ensureTable(mTable[1]); continue }
+    if (!current) throw new Error('No TABLE defined before rules')
+
+    const m = line.match(/^([A-Za-z]+)\s*(?:\(([^)]*)\))?\s*(?::\s*([0-9]*\.?[0-9]+))?\s*->\s*(.+)$/)
+    if (!m) throw new Error('Bad rule: ' + line)
+    const headSym = m[1]
+    const headParams = (m[2] ? m[2].split(',').map(s => s.trim()).filter(Boolean) : [])
+    const prob = m[3] != null ? parseFloat(m[3]) : null
+    const rhs = m[4]
+
+    const tokens = tokenizeRHS(rhs)
+    const builders = tokens.map(tok => compileToken(tok, headParams))
+    const rule = {
+      prob,
+      succ: (params, rand) => {
+        const env = Object.fromEntries(headParams.map((k, i) => [k, params[i]]))
+        const out = []
+        for (const b of builders) {
+          const part = b(env, rand)
+          if (Array.isArray(part)) out.push(...part)
+          else if (part) out.push(part)
+        }
+        return out
+      }
+    }
+    if (!current.productions.has(headSym)) current.productions.set(headSym, [])
+    current.productions.get(headSym).push(rule)
+  }
+  return tables
+}
+
+function tokenizeRHS (rhs) {
+  const out = []
+  let buf = ''
+  let depth = 0
+  for (let i = 0; i < rhs.length; i++) {
+    const ch = rhs[i]
+    if (ch === '[' || ch === ']') {
+      if (depth === 0) { if (buf.trim()) { out.push(buf.trim()); buf = '' } out.push(ch); continue }
+    }
+    if (ch === '(') depth++
+    if (ch === ')') depth--
+    if (/(\s)/.test(ch) && depth === 0) { if (buf.trim()) { out.push(buf.trim()); buf = '' } }
+    else buf += ch
+  }
+  if (buf.trim()) out.push(buf.trim())
+  return out
+}
+
+function compileToken (token, headParams) {
+  if (token === '[' || token === ']' || token === '|') return () => new Sym(token)
+  const m = token.match(/^(.+?)(?:\((.*)\))?$/)
+  if (!m) throw new Error('Bad token: ' + token)
+  const name = m[1]
+  const args = (m[2] ?? '').trim()
+
+  if (!args) {
+    return () => new Sym(name)
+  }
+  // Compile expression list into a function of head params + rand
+  const keys = [...headParams, 'rand']
+  const body = `return [${args}]`
+  const fn = new Function(...keys, body)
+  return (env, rand) => {
+    const values = headParams.map(k => env[k])
+    const arr = fn(...values, rand)
+    return new Sym(name, arr)
+  }
+}
+
+// ---------------------------- 3D Turtle Interpreter ----------------------------
 function buildPlant (word, opts = {}) {
   const angle = opts.angle ?? 25
   const step = opts.step ?? 1
@@ -95,7 +179,6 @@ function buildPlant (word, opts = {}) {
   const branchGeoms = []
   const leafTransforms = []
 
-  // Turtle state: pos + orthonormal frame (H,L,U) + width
   const H0 = new THREE.Vector3(0, 1, 0)
   const L0 = new THREE.Vector3(-1, 0, 0)
   const U0 = new THREE.Vector3(0, 0, 1)
@@ -144,7 +227,8 @@ function buildPlant (word, opts = {}) {
     else if (t === '!') { if (p.length) state.w = p[0]; else state.w *= 0.70710678 }
     else if (t === 'L') {
       const size = p[0] ?? (opts.leaf?.size ?? 0.35)
-      const normal = state.H.clone().normalize()
+      // Face leaves outward around the stem (normal = turtle's left vector)
+      const normal = state.L.clone().normalize()
       const up = state.U.clone().normalize()
       const right = new THREE.Vector3().crossVectors(up, normal).normalize()
       const m = new THREE.Matrix4().makeBasis(right, up, normal)
@@ -172,43 +256,38 @@ function buildPlant (word, opts = {}) {
   return group
 }
 
-// ---------------------------- Example tables (veg → flower) ----------------------------
-function makeTables (rand) {
-  const R = () => rand()
-  const Fwd = (l) => new Sym('F', [l])
-  const rot = (sym, a) => new Sym(sym, [a])
-  const W = (w) => new Sym('!', [w])
-  const Leaf = (s) => new Sym('L', [s])
-
-  const veg = new Map()
-  veg.set('A', [{ succ: ([l, w]) => [ W(w), Fwd(l), new Sym('['), rot('&', 25), Leaf(0.4 + 0.2 * R()), new Sym(']'), new Sym('['), rot('^', 25), Leaf(0.4 + 0.2 * R()), new Sym(']'), rot('/', 137.5), new Sym('A', [l * 0.92, w * 0.9]) ] }])
-  veg.set('B', [{ succ: ([l, w]) => [ W(w), Fwd(l), new Sym('['), rot('+', 25 + 10 * (R() - 0.5)), new Sym('A', [l * 0.8, w * 0.9]), new Sym(']'), new Sym('B', [l * 0.9, w * 0.92]) ] }])
-  veg.set('C', [{ succ: ([l, w]) => [ W(w), Fwd(l), new Sym('['), rot('-', 25 + 10 * (R() - 0.5)), new Sym('A', [l * 0.8, w * 0.9]), new Sym(']'), new Sym('C', [l * 0.9, w * 0.92]) ] }])
-  veg.set('!', [{ succ: ([w]) => [ new Sym('!', [Math.max(0.02, (w ?? 0.08) * 0.98)]) ] }])
-
-  const flo = new Map()
-  flo.set('A', [{ succ: ([l, w]) => [ W(w), Fwd(l), new Sym('['), rot('&', 20), Leaf(0.55), new Sym(']'), new Sym('['), rot('^', 20), Leaf(0.55), new Sym(']') ] }])
-  flo.set('B', [{ succ: ([l, w]) => [ W(w), Fwd(l * 0.7) ] }])
-  flo.set('C', [{ succ: ([l, w]) => [ W(w), Fwd(l * 0.7) ] }])
-
-  return [ { name: 'veg', productions: veg }, { name: 'flower', productions: flo } ]
-}
-
 // ---------------------------- Vue state & Three scene ----------------------------
 const mount = ref(null)
 const seed = ref(3)
-const steps = ref(10)
+const steps = ref(12)
 const schedule = ref([
-  { name: 'veg', steps: 7 },
-  { name: 'flower', steps: 3 }
+  { name: 'veg', steps: 8 },
+  { name: 'flower', steps: 4 }
 ])
 
 const scheduleLabel = computed(() => schedule.value.map(s => `${s.name}×${s.steps}`).join(' → '))
+
+// Default tiny-DSL model
+const dsl = ref(`
+TABLE veg:
+A(l,w) : 0.38 -> !(w) F(l) [+(25+10*(rand()-0.5)) &(20) !(w*0.7) B(l*0.8,w*0.7)] [-(25+10*(rand()-0.5)) &(20) !(w*0.7) C(l*0.8,w*0.7)] /(137.5) A(l*0.92,w*0.92)
+A(l,w) : 0.62 -> !(w) F(l) ! /(137.5) A(l*0.95,w*0.96)
+B(l,w) : 0.50 -> !(w) F(l) [+(15+10*(rand()-0.5)) !(w*0.75) B(l*0.85,w*0.85)] /(137.5) B(l*0.9,w*0.92)
+B(l,w) : 0.50 -> !(w) F(l) /(137.5) B(l*0.9,w*0.92)
+C(l,w) : 0.50 -> !(w) F(l) [-(15+10*(rand()-0.5)) !(w*0.75) C(l*0.85,w*0.85)] /(137.5) C(l*0.9,w*0.92)
+C(l,w) : 0.50 -> !(w) F(l) /(137.5) C(l*0.9,w*0.92)
+
+TABLE flower:
+A(l,w) -> !(w) F(l*0.7) [&(30) L(0.7)] [^(30) L(0.7)]
+B(l,w) -> !(w*0.8) F(l*0.6) [&(20) L(0.55)]
+C(l,w) -> !(w*0.8) F(l*0.6) [^(20) L(0.55)]
+`)
 
 let renderer, scene, camera, controls
 let plantGroup = null
 
 function rebuildScene (word) {
+  if (!scene) return
   // Remove old plant
   if (plantGroup) {
     scene.remove(plantGroup)
@@ -236,7 +315,14 @@ function rebuildScene (word) {
 
 function deriveWord () {
   const rand = makeRng(seed.value)
-  const tables = makeTables(rand)
+  let tables
+  try {
+    tables = parseDSL(dsl.value)
+  } catch (e) {
+    console.error('DSL parse error:', e)
+    // Fallback to a minimal table if parse fails
+    tables = [{ name: 'veg', productions: new Map([['A', [{ succ: ([l,w]) => [new Sym('!', [w]), new Sym('F', [l]), new Sym('A', [l*0.9, w*0.95])]}]]]) }]
+  }
   const axiom = [ new Sym('[', []), new Sym('A', [1.2, 0.13]), new Sym(']', []) ]
   const w = deriveWithTables(axiom, tables, schedule.value, steps.value, rand)
   return w
@@ -244,6 +330,9 @@ function deriveWord () {
 
 onMounted(() => {
   const el = mount.value
+  // Ensure visible height
+  if (!el.style.height) el.style.height = 'calc(100vh - 56px)'
+
   renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true })
   renderer.setPixelRatio(window.devicePixelRatio || 1)
   renderer.setSize(el.clientWidth, el.clientHeight)
@@ -282,8 +371,7 @@ onMounted(() => {
   }
   window.addEventListener('resize', handleResize)
 
-  // reactive rebuilds
-  const stopW = watch([seed, steps, schedule], () => rebuildScene(deriveWord()))
+  const stopW = watch([seed, steps, schedule, dsl], () => rebuildScene(deriveWord()))
 
   onBeforeUnmount(() => {
     stopW()
@@ -296,5 +384,7 @@ onMounted(() => {
 </script>
 
 <style>
-html, body, #app { height: 100%; margin: 0; }
+html, body, #app { width: 100%; height: 100%; margin: 0; }
+.viewer { flex: 1 1 auto; min-height: 420px; height: calc(100vh - 56px); }
+canvas{ width: 100% !important;}
 </style>
