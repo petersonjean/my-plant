@@ -1,13 +1,45 @@
 <template>
-  <div class="w-full h-full flex flex-col">
-    <div class="p-3 flex items-center gap-3 border-b" style="background:rgba(255,255,255,.7);backdrop-filter:saturate(1.2) blur(6px)">
-      <div class="text-sm font-medium">Steps</div>
-      <input type="range" min="3" max="24" v-model.number="steps" />
-      <div class="text-sm tabular-nums w-8 text-right">{{ steps }}</div>
-      <button class="px-3 py-1 rounded-xl text-white text-sm" style="background:#0f172a" @click="seed++">Reseed</button>
-      <div class="text-xs text-slate-600 truncate">Tables: {{ scheduleLabel }}</div>
-    </div>
-    <div ref="mount" class="viewer"></div>
+  <div class="h-full w-full flex">
+    <!-- Left panel with tabs/config -->
+    <aside class="w-96 border-r flex flex-col bg-white/60 backdrop-blur">
+      <div class="p-3 font-semibold">Plant L‑system</div>
+
+      <div class="px-3 pb-2">
+        <label class="block text-xs text-slate-600 mb-1">Branching preset</label>
+        <select v-model="preset" class="w-full border rounded px-2 py-1 text-sm">
+          <option value="monopodial">Monopodial (lateral)</option>
+          <option value="sympodial">Sympodial (Aono–Kunii inspired)</option>
+        </select>
+      </div>
+
+      <div class="px-3 py-2 flex items-center gap-3">
+        <span class="text-sm">Steps</span>
+        <input type="range" min="4" max="24" v-model.number="steps" />
+        <span class="w-8 text-right text-sm tabular-nums">{{ steps }}</span>
+      </div>
+      <div class="px-3 py-2 flex gap-2">
+        <button class="btn" @click="seed++">Reseed</button>
+        <button class="btn-alt" @click="resetPreset">Reset preset</button>
+      </div>
+      <div class="px-3 pb-2 text-xs text-slate-600">Schedule: {{ scheduleLabel }}</div>
+
+      <div class="px-3 pt-2 flex gap-2">
+        <button :class="tabBtn('controls')" @click="tab='controls'">Controls</button>
+        <button :class="tabBtn('dsl')" @click="tab='dsl'">DSL</button>
+      </div>
+
+      <div v-if="tab==='controls'" class="p-3 text-xs text-slate-700 leading-relaxed">
+        <p>Pick a preset, tweak <b>Steps</b> and <b>Seed</b>. The grammar below updates automatically. Edit the DSL to customize rules; the right side renders the result.</p>
+      </div>
+      <div v-else class="p-3">
+        <textarea v-model="dsl" class="code" spellcheck="false"></textarea>
+      </div>
+    </aside>
+
+    <!-- Right: viewer fills remaining space -->
+    <main class="flex-1 relative">
+      <div ref="mount" class="viewer"></div>
+    </main>
   </div>
 </template>
 
@@ -267,8 +299,13 @@ const schedule = ref([
 
 const scheduleLabel = computed(() => schedule.value.map(s => `${s.name}×${s.steps}`).join(' → '))
 
-// Default tiny-DSL model
-const dsl = ref(`
+// UI tabs + preset handling
+const tab = ref('dsl')
+const preset = ref('monopodial')
+const tabBtn = (n) => `px-2 py-1 rounded text-sm ${tab.value===n? 'bg-slate-900 text-white':'bg-slate-100 text-slate-700'}`
+
+// ---- DSL presets (modular) ----
+function dslMonopodial () { return `
 TABLE veg:
 A(l,w) : 0.38 -> !(w) F(l) [+(25+10*(rand()-0.5)) &(20) !(w*0.7) B(l*0.8,w*0.7)] [-(25+10*(rand()-0.5)) &(20) !(w*0.7) C(l*0.8,w*0.7)] /(137.5) A(l*0.92,w*0.92)
 A(l,w) : 0.62 -> !(w) F(l) ! /(137.5) A(l*0.95,w*0.96)
@@ -281,9 +318,28 @@ TABLE flower:
 A(l,w) -> !(w) F(l*0.7) [&(30) L(0.7)] [^(30) L(0.7)]
 B(l,w) -> !(w*0.8) F(l*0.6) [&(20) L(0.55)]
 C(l,w) -> !(w*0.8) F(l*0.6) [^(20) L(0.55)]
-`)
+` }
 
-let renderer, scene, camera, controls
+// Sympodial: main apex only emits trunk segment + two lateral apices; laterals continue similarly
+function dslSympodial () { return `
+TABLE veg:
+# p1: main apex makes trunk then a symmetric pair of lateral apices
+A(l,w) -> !(w) F(l) [+(25) &(20) !(w*0.75) B(l*0.85,w*0.75)] [-(25) &(20) !(w*0.75) B(l*0.85,w*0.75)]
+# p2: each lateral continues bifurcating (no axial continuation by A)
+B(l,w) : 0.55 -> !(w) F(l) [+(22) !(w*0.8) B(l*0.86,w*0.86)] [-(22) !(w*0.8) B(l*0.86,w*0.86)] /(137.5)
+B(l,w) : 0.45 -> !(w) F(l*0.9) /(137.5) B(l*0.9,w*0.9)
+
+TABLE flower:
+# finish with small leaf clusters at tips (placeholder for inflorescences)
+A(l,w) -> !(w) F(l*0.6) [&(25) L(0.6)] [^(25) L(0.6)]
+B(l,w) -> !(w) F(l*0.6) [&(20) L(0.5)] [^(20) L(0.5)]
+` }
+
+const dsl = ref('')
+function resetPreset(){ dsl.value = (preset.value === 'monopodial' ? dslMonopodial() : dslSympodial()) }
+watch(preset, resetPreset, { immediate: true }); schedule.value.map(s => `${s.name}×${s.steps}`).join(' → ');
+
+let renderer, scene, camera, controls;
 let plantGroup = null
 
 function rebuildScene (word) {
@@ -385,6 +441,8 @@ onMounted(() => {
 
 <style>
 html, body, #app { width: 100%; height: 100%; margin: 0; }
-.viewer { flex: 1 1 auto; min-height: 420px; height: calc(100vh - 56px); }
-canvas{ width: 100% !important;}
+.viewer { flex: 1 1 auto; min-height: 420px; height: calc(100vh - 0px); }
+.btn { background:#0f172a; color:white; padding:0.25rem 0.6rem; border-radius:0.6rem; font-size:0.875rem }
+.btn-alt { background:#e2e8f0; color:#0f172a; padding:0.25rem 0.6rem; border-radius:0.6rem; font-size:0.875rem }
+.code { width:100%; height: 280px; font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; border:1px solid #e2e8f0; border-radius:12px; padding:10px; background:white; }
 </style>
